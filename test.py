@@ -11,6 +11,8 @@ import redis
 
 load_dotenv()
 
+tavily_tool = TavilySearchResults(max_results=2)
+
 # =========================
 # Model Selector
 # =========================
@@ -46,6 +48,7 @@ prompt = """
 2. غیر ضروری یا غیر متعلقہ معلومات شامل نہ کریں۔
 3. زبان سادہ، رواں اور صحافتی معیار کے مطابق ہونی چاہیے۔
 4. خبر کو منطقی ترتیب اور پیراگراف کی شکل میں پیش کریں۔
+5. اگر خبر میں حقائق نامکمل ہوں یا مزید درست/تازہ معلومات درکار ہوں تو tavily_tool سرچ ٹول استعمال کریں اور اسی بنیاد پر خبر بہتر بنائیں۔
 
 آؤٹ پٹ فارمیٹ:
 
@@ -65,7 +68,7 @@ prompt = """
 # =========================
 # Agent
 # =========================
-tavily_tool = TavilySearchResults(max_results=5)
+
 
 agent = create_agent(
     model=llm,
@@ -127,16 +130,12 @@ def run_agent(raw_text: str, extra_instructions: str = "") -> str:
 
 def _format_queue_item(item: dict) -> str:
     source = item.get("source") or "unknown"
+    msg = str(item.get("message") or "").strip()
     if source == "group":
-        name = item.get("group_name") or "Unknown Group"
-        sender = item.get("sender") or ""
-        msg = item.get("message") or ""
-        return f"[group] {name}{(' · ' + sender) if sender else ''}: {msg}"
+        return f"[group] {msg}" if msg else "[group] (empty)"
     if source == "channel":
-        name = item.get("channel_name") or "Channel"
-        msg = item.get("message") or ""
-        return f"[channel] {name}: {msg}"
-    return json.dumps(item, ensure_ascii=False)
+        return f"[channel] {msg}" if msg else "[channel] (empty)"
+    return msg or "(empty)"
 
 
 def drain_redis_queue(redis_url: str, queue_key: str, max_items: int = 50) -> list[dict]:
