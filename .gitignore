@@ -35,6 +35,7 @@ htmlcov/
 
 # --- Node.js ---
 node_modules/
+.wwebjs_cache/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

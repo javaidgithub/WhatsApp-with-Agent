@@ -6,4 +6,5 @@ langchain-openai==1.1.12
 langchain-groq==1.1.2
 streamlit==1.56.0
 langchain==1.2.15
+python-dotenv==1.2.2
 # npm install ioredis whatsapp-web.js qrcode-terminal

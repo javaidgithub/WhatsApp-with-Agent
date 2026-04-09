@@ -175,11 +175,13 @@
 ###############################################################################################################
 
 import os
+import json
 import streamlit as st
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_groq import ChatGroq
 from langchain.agents import create_agent
+import redis
 
 load_dotenv()
 
@@ -242,6 +244,9 @@ agent = create_agent(
     system_prompt=prompt
 )
 
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+QUEUE_KEY = os.getenv("QUEUE_KEY", "whatsapp:messages")
+
 
 # =========================
 # Helper: Run Agent
@@ -291,6 +296,37 @@ def run_agent(raw_text: str, extra_instructions: str = "") -> str:
 
     return "No response found"
 
+def _format_queue_item(item: dict) -> str:
+    source = item.get("source") or "unknown"
+    if source == "group":
+        name = item.get("group_name") or "Unknown Group"
+        sender = item.get("sender") or ""
+        msg = item.get("message") or ""
+        return f"[group] {name}{(' · ' + sender) if sender else ''}: {msg}"
+    if source == "channel":
+        name = item.get("channel_name") or "Channel"
+        msg = item.get("message") or ""
+        return f"[channel] {name}: {msg}"
+    return json.dumps(item, ensure_ascii=False)
+
+
+def drain_redis_queue(redis_url: str, queue_key: str, max_items: int = 50) -> list[dict]:
+    """
+    Drain up to max_items messages from Redis list queue.
+    Note: This consumes messages (LPOP).
+    """
+    client = redis.Redis.from_url(redis_url, decode_responses=True)
+    out: list[dict] = []
+    for _ in range(max_items):
+        raw = client.lpop(queue_key)
+        if raw is None:
+            break
+        try:
+            out.append(json.loads(raw))
+        except Exception:
+            out.append({"source": "unknown", "message": str(raw)})
+    return out
+
 
 # =========================
 # Streamlit UI
@@ -314,6 +350,8 @@ st.divider()
 # =========================
 # Session State Init
 # =========================
+if "queue_items" not in st.session_state:
+    st.session_state.queue_items = []
 if "generated_news" not in st.session_state:
     st.session_state.generated_news = None          # current generated article
 if "raw_text" not in st.session_state:
@@ -323,27 +361,100 @@ if "approval_status" not in st.session_state:
 if "show_improve_box" not in st.session_state:
     st.session_state.show_improve_box = False
 
-# =========================
-# Input — only shown before first generation
-# =========================
-if st.session_state.generated_news is None:
-    urdu_text = st.text_area(
-        label="📝 Enter raw news text in Urdu",
-        placeholder="Enter raw news text in Urdu",
-        height=180
-    )
 
-    if st.button("🚀 Convert to Professional News", use_container_width=True):
-        if not urdu_text.strip():
-            st.warning("⚠️ Please enter raw news text in Urdu.")
-        else:
-            with st.spinner("🔎 Researching and preparing the news..."):
-                result = run_agent(urdu_text)
-            st.session_state.raw_text = urdu_text
+def _reset_article_state():
+    for key in ["generated_news", "raw_text", "approval_status", "show_improve_box"]:
+        st.session_state[key] = None if key != "show_improve_box" else False
+
+
+tab_manual, tab_queue = st.tabs(["✍️ Manual input", "📥 From WhatsApp queue"])
+
+with tab_queue:
+    st.markdown("### 📥 WhatsApp queued messages → News")
+    st.caption("This consumes messages from Redis (LPOP). Start FastAPI + Redis + Node ingesters first.")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        redis_url = st.text_input("Redis URL", value=REDIS_URL)
+    with col_b:
+        queue_key = st.text_input("Queue key", value=QUEUE_KEY)
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        max_items = st.number_input("Max to pull", min_value=1, max_value=500, value=50, step=10)
+    with col2:
+        if st.button("⬇️ Pull from queue", use_container_width=True):
+            try:
+                new_items = drain_redis_queue(redis_url, queue_key, int(max_items))
+                if new_items:
+                    st.session_state.queue_items = new_items + st.session_state.queue_items
+                    st.success(f"Pulled {len(new_items)} message(s).")
+                else:
+                    st.info("No new messages in queue.")
+            except Exception as e:
+                st.error(f"Failed to pull from Redis: {e}")
+    with col3:
+        if st.button("🧹 Clear list", use_container_width=True):
+            st.session_state.queue_items = []
+            st.rerun()
+
+    st.markdown(f"**Loaded messages:** {len(st.session_state.queue_items)}")
+
+    if st.session_state.queue_items:
+        labels = [_format_queue_item(i) for i in st.session_state.queue_items]
+        selected_idx = st.selectbox(
+            "Select a message to convert",
+            options=list(range(len(labels))),
+            format_func=lambda i: labels[i][:200] + ("…" if len(labels[i]) > 200 else ""),
+        )
+        selected = st.session_state.queue_items[int(selected_idx)]
+
+        st.markdown("#### Selected message")
+        st.code(_format_queue_item(selected), language="text")
+
+        extra_queue = st.text_area(
+            "Extra instructions (optional)",
+            placeholder="e.g. مزید تفصیل شامل کریں / Add more context / Make the headline more impactful",
+            height=90,
+            key="queue_extra",
+        )
+
+        if st.button("📰 Generate news from this message", use_container_width=True):
+            with st.spinner("🔎 Generating news..."):
+                payload_text = _format_queue_item(selected)
+                result = run_agent(payload_text, extra_queue or "")
+            st.session_state.raw_text = payload_text
             st.session_state.generated_news = result
             st.session_state.approval_status = None
             st.session_state.show_improve_box = False
             st.rerun()
+    else:
+        st.info("No messages loaded yet. Click “Pull from queue”.")
+
+
+with tab_manual:
+
+# =========================
+# Input — only shown before first generation
+# =========================
+    if st.session_state.generated_news is None:
+        urdu_text = st.text_area(
+            label="📝 Enter raw news text in Urdu",
+            placeholder="Enter raw news text in Urdu",
+            height=180
+        )
+
+        if st.button("🚀 Convert to Professional News", use_container_width=True):
+            if not urdu_text.strip():
+                st.warning("⚠️ Please enter raw news text in Urdu.")
+            else:
+                with st.spinner("🔎 Researching and preparing the news..."):
+                    result = run_agent(urdu_text)
+                st.session_state.raw_text = urdu_text
+                st.session_state.generated_news = result
+                st.session_state.approval_status = None
+                st.session_state.show_improve_box = False
+                st.rerun()
 
 # =========================
 # Output + Human Approval
@@ -367,8 +478,7 @@ if st.session_state.generated_news is not None:
     if st.session_state.approval_status == "approved":
         st.success("✅ News approved and forwarded to the next step!")
         if st.button("🔄 Start Over", use_container_width=True):
-            for key in ["generated_news", "raw_text", "approval_status", "show_improve_box"]:
-                st.session_state[key] = None if key != "show_improve_box" else False
+            _reset_article_state()
             st.rerun()
 
     elif st.session_state.approval_status is None or st.session_state.approval_status == "improve":
