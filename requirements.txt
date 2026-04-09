@@ -1,0 +1,9 @@
+fastapi==0.135.0
+uvicorn[standard]==0.44.0
+redis[asyncio]==7.4.0
+pydantic==2.12.5
+langchain-openai==1.1.12
+langchain-groq==1.1.2
+streamlit==1.56.0
+langchain==1.2.15
+# npm install ioredis whatsapp-web.js qrcode-terminal
